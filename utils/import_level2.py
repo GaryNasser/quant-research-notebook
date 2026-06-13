@@ -3,7 +3,9 @@ Import Level2 CSV data (from 7z archives or loose files) into ClickHouse.
 
 This script scans a data directory for 7z archives or CSV files, extracts them
 if needed, cleans the data according to pre-defined schemas, and imports them
-into corresponding ClickHouse tables.
+into corresponding ClickHouse tables. Data rows are accumulated in memory and
+flushed to ClickHouse in batches (default 100,000 rows) to avoid excessive small
+inserts and improve performance.
 
 Configuration is provided via command-line arguments (with environment variable fallbacks).
 All output is in English.
@@ -17,8 +19,8 @@ Usage examples:
     export CLICKHOUSE_PASSWORD=your_password
     python import_level2.py --data-dir /data/level2 --host 10.0.0.5
 
-    # Increase concurrency and enable verbose logging
-    python import_level2.py --max-workers 16 --verbose --log-file import.log
+    # Increase concurrency and adjust batch size
+    python import_level2.py --max-workers 16 --batch-size 50000 --verbose --log-file import.log
 """
 
 import os
@@ -30,25 +32,17 @@ import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
 import subprocess
 import shutil
 import warnings
 
-# Suppress verbose logs from clickhouse_connect and pandas warnings
 logging.getLogger("clickhouse_connect").setLevel(logging.CRITICAL + 1)
 warnings.filterwarnings('ignore')
 
-# ---------- Module-level runtime configuration ----------
-# These are set in main() after parsing command-line arguments.
-# They are safe for concurrent read access by worker threads.
-_client = None          # clickhouse_connect client instance
+_client = None
 _table_prefix = "level2"
 _max_workers = 8
-# --------------------------------------------------------
-
-stats_lock = Lock()
-
+_batch_size = 100000
 
 def parse_args():
     """Parse command line arguments, falling back to environment variables."""
@@ -92,6 +86,9 @@ Examples:
     parser.add_argument('--max-workers', type=int,
                         default=int(os.getenv("MAX_WORKERS", "8")),
                         help='Maximum parallel workers for file processing (default: %(default)s)')
+    parser.add_argument('--batch-size', type=int,
+                        default=int(os.getenv("BATCH_SIZE", "100000")),
+                        help='Number of rows per insert batch (default: %(default)s)')
 
     # Logging
     parser.add_argument('--log-file', type=str, default='import_level2.log',
@@ -363,19 +360,27 @@ def print_file_statistics(csv_files: list, source_desc: str = ""):
 
 def process_single_file(file_path: Path) -> dict:
     """
-    Process a single CSV file: read, clean, and insert into ClickHouse.
+    Process a single CSV file: read, clean, and return the cleaned DataFrame.
+
+    The function no longer inserts data into ClickHouse directly; instead it
+    returns the DataFrame so that the caller can batch-insert later.
 
     Args:
         file_path: Path to the CSV file.
 
     Returns:
-        A dict with keys 'type', 'rows', 'success' if processing was attempted,
-        otherwise None if the file type could not be determined or an error occurred.
+        A dict with keys:
+            'success': bool,
+            'type': str (snapshot/entrust/trade) or None,
+            'df': cleaned DataFrame or None,
+            'rows': int (number of rows in df, 0 if failed),
+            'error': str (error message if any)
+        If file type cannot be determined, returns {'success': False, ...}.
     """
     logger = logging.getLogger(__name__)
     file_type = get_file_type(file_path)
     if not file_type:
-        return None
+        return {'success': False, 'type': None, 'df': None, 'rows': 0, 'error': 'Unrecognized file type'}
 
     try:
         df = pd.read_csv(file_path, encoding='gbk')
@@ -388,19 +393,40 @@ def process_single_file(file_path: Path) -> dict:
         df_clean = clean_dataframe(df, file_type)
 
         if df_clean is not None and len(df_clean) > 0:
-            rows_inserted = import_to_clickhouse(df_clean, file_type)
-            return {'type': file_type, 'rows': rows_inserted, 'success': rows_inserted > 0}
+            return {
+                'success': True,
+                'type': file_type,
+                'df': df_clean,
+                'rows': len(df_clean),
+                'error': None
+            }
         else:
-            return {'type': file_type, 'rows': 0, 'success': False}
-
+            return {
+                'success': False,
+                'type': file_type,
+                'df': None,
+                'rows': 0,
+                'error': 'Empty or invalid after cleaning'
+            }
     except Exception as e:
         logger.error(f"Error processing {file_path}: {e}")
-        return None
+        return {
+            'success': False,
+            'type': file_type,
+            'df': None,
+            'rows': 0,
+            'error': str(e)
+        }
 
 
 def process_csv_files(csv_files: list, desc: str = "Import progress") -> dict:
     """
-    Process a list of CSV files in parallel and return aggregated statistics.
+    Process a list of CSV files in parallel and insert data in batches.
+
+    DataFrames from successful file reads are accumulated per table type.
+    When the number of accumulated rows reaches `_batch_size`, the buffered
+    data is flushed to ClickHouse in a single insert. Remaining data is flushed
+    after all files have been processed.
 
     Args:
         csv_files: List of CSV file paths.
@@ -408,15 +434,42 @@ def process_csv_files(csv_files: list, desc: str = "Import progress") -> dict:
 
     Returns:
         Nested dictionary:
-            { 'snapshot': {'files': count, 'rows': total_rows},
+            { 'snapshot': {'files': count, 'rows': total_rows_inserted},
               'entrust':  ...,
               'trade':    ... }
     """
+    logger = logging.getLogger(__name__)
+
+    # Local statistics: files count as soon as a file is successfully cleaned,
+    # rows count after successful batch flush.
     stats = {
         'snapshot': {'files': 0, 'rows': 0},
         'entrust': {'files': 0, 'rows': 0},
         'trade': {'files': 0, 'rows': 0}
     }
+
+    # Buffers for each table type
+    buffers = {'snapshot': [], 'entrust': [], 'trade': []}
+    buffer_rows = {'snapshot': 0, 'entrust': 0, 'trade': 0}
+
+    def flush(table_type: str):
+        """Concatenate buffered DataFrames of the given type and insert into ClickHouse."""
+        if not buffers[table_type]:
+            return
+        combined = pd.concat(buffers[table_type], ignore_index=True)
+        combined = combined.where(pd.notna(combined), None)  # ensure None for NULL
+        rows_total = len(combined)
+        rows_ok = import_to_clickhouse(combined, table_type)
+        stats[table_type]['rows'] += rows_ok
+        if rows_ok < rows_total:
+            logger.warning(
+                f"Batch insert to {table_type}: only {rows_ok}/{rows_total} rows inserted"
+            )
+        else:
+            logger.debug(f"Flushed {rows_ok} rows to {table_type}")
+        # Clear buffers
+        buffers[table_type] = []
+        buffer_rows[table_type] = 0
 
     with ThreadPoolExecutor(max_workers=_max_workers) as executor:
         futures = {executor.submit(process_single_file, fp): fp for fp in csv_files}
@@ -424,12 +477,22 @@ def process_csv_files(csv_files: list, desc: str = "Import progress") -> dict:
         with tqdm(total=len(csv_files), desc=desc, unit="file",
                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as pbar:
             for future in as_completed(futures):
-                result = future.result()
-                if result and result['success']:
-                    with stats_lock:
-                        stats[result['type']]['files'] += 1
-                        stats[result['type']]['rows'] += result['rows']
+                res = future.result()
+                if res and res.get('success'):
+                    typ = res['type']
+                    df = res['df']
+                    # Update file count
+                    stats[typ]['files'] += 1
+                    # Buffer the DataFrame
+                    buffers[typ].append(df)
+                    buffer_rows[typ] += len(df)
+                    if buffer_rows[typ] >= _batch_size:
+                        flush(typ)
                 pbar.update(1)
+
+        # Flush remaining data for all types
+        for typ in buffers:
+            flush(typ)
 
     return stats
 
@@ -585,7 +648,7 @@ def main():
     logger.info("Starting Level2 data import")
 
     # ---------- Initialize global configuration ----------
-    global _client, _table_prefix, _max_workers
+    global _client, _table_prefix, _max_workers, _batch_size
 
     try:
         _client = clickhouse_connect.get_client(
@@ -603,6 +666,7 @@ def main():
 
     _table_prefix = args.table_prefix
     _max_workers = args.max_workers
+    _batch_size = args.batch_size
     # -----------------------------------------------------
 
     data_dir = Path(args.data_dir)
