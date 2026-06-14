@@ -34,6 +34,8 @@ from threading import Lock
 import subprocess
 import shutil
 import warnings
+import threading
+_db_lock = threading.Lock()
 
 # Suppress verbose logs from clickhouse_connect and pandas warnings
 logging.getLogger("clickhouse_connect").setLevel(logging.CRITICAL + 1)
@@ -137,27 +139,27 @@ def clean_dataframe(df: pd.DataFrame, table_type: str) -> pd.DataFrame:
 
     This function removes unnamed columns, empty rows, renames columns according
     to predefined mapping, handles array fields for snapshot data, and performs
-    type conversions. NaN values are replaced with None (ClickHouse NULL).
+    type conversions. Missing values are kept as native pandas NA (pd.NA) using
+    nullable dtypes (Int64, Float64, string), which ClickHouse-connect can
+    safely serialize.
 
     Args:
         df: Raw pandas DataFrame read from CSV.
         table_type: Type of data - 'snapshot', 'entrust', or 'trade'.
 
     Returns:
-        Cleaned DataFrame with English column names and correct types, or None if
-        table_type is unknown.
+        Cleaned DataFrame with English column names and correct nullable types,
+        or None if table_type is unknown.
     """
-    # Remove unnamed columns (resulting from extra commas etc.)
+
     unnamed_cols = [col for col in df.columns if 'Unnamed' in col]
     if unnamed_cols:
         df = df.drop(columns=unnamed_cols)
 
-    # Drop rows that are entirely null
     df = df.dropna(how='all')
 
-    # Define column mappings for each table type
     if table_type == 'snapshot':
-        # Handle bid/ask arrays: combine 10 separate columns into lists
+        # Combine 10 ask/bid price/volume columns into list columns
         ask_price_cols = [f'申卖价{i}' for i in range(1, 11) if f'申卖价{i}' in df.columns]
         ask_volume_cols = [f'申卖量{i}' for i in range(1, 11) if f'申卖量{i}' in df.columns]
         bid_price_cols = [f'申买价{i}' for i in range(1, 11) if f'申买价{i}' in df.columns]
@@ -231,41 +233,47 @@ def clean_dataframe(df: pd.DataFrame, table_type: str) -> pd.DataFrame:
     else:
         return None
 
-    # Rename columns that actually exist in the dataframe
     existing_mapping = {k: v for k, v in column_mapping.items() if k in df.columns}
     df = df.rename(columns=existing_mapping)
 
-    # Keep only the mapped columns
     keep_cols = list(existing_mapping.values())
     df = df[keep_cols]
 
-    # Type conversions
+    int_cols = {
+        'trade_date', 'trade_time', 'trade_count', 'trade_flag', 'bs_flag',
+        'entrust_no', 'exchange_entrust_no', 'trade_no', 'ask_order_no', 'bid_order_no',
+        'total_securities', 'advancing_securities', 'declining_securities', 'unchanged_securities'
+    }
+    float_cols = {
+        'price', 'volume', 'turnover', 'iopv',
+        'cumulative_volume', 'cumulative_turnover', 'high_price', 'low_price',
+        'open_price', 'pre_close', 'weighted_avg_ask', 'weighted_avg_bid',
+        'total_ask_volume', 'total_bid_volume', 'unweighted_index',
+        'entrust_price', 'entrust_volume', 'trade_price', 'trade_volume'
+    }
+    str_cols = {
+        'wind_code', 'exchange_code', 'entrust_type', 'entrust_code', 'trade_code'
+    }
+    array_cols = {'ask_price', 'ask_volume', 'bid_price', 'bid_volume'}
+
     for col in df.columns:
-        if col in ['trade_date', 'trade_time']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        elif col in ['price', 'volume', 'turnover', 'trade_count', 'iopv',
-                     'cumulative_volume', 'cumulative_turnover', 'high_price', 'low_price',
-                     'open_price', 'pre_close', 'weighted_avg_ask', 'weighted_avg_bid',
-                     'total_ask_volume', 'total_bid_volume', 'unweighted_index',
-                     'total_securities', 'advancing_securities', 'declining_securities',
-                     'unchanged_securities', 'entrust_no', 'exchange_entrust_no',
-                     'entrust_price', 'entrust_volume', 'trade_no', 'trade_price',
-                     'trade_volume', 'ask_order_no', 'bid_order_no']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        elif col in ['trade_flag', 'bs_flag']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+        if col in array_cols:
+            continue
+        elif col in int_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
+        elif col in float_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype('Float64')
+        elif col in str_cols:
+            df[col] = df[col].astype(str).replace(['', 'nan', 'NaN', 'None', 'NaT'], None)
+            df[col] = df[col].astype('string')
         else:
-            df[col] = df[col].astype(str)
-            df[col] = df[col].replace(['', 'nan', 'NaN', 'None', 'NaT'], None)
+            df[col] = df[col].astype(str).replace(['', 'nan', 'NaN', 'None', 'NaT'], None)
+            df[col] = df[col].astype('string')
 
-    # Convert NaN to None (ClickHouse NULL)
-    df = df.where(pd.notna(df), None)
-
-    # For snapshot tables, ensure array fields have default value [0]*10
     if table_type == 'snapshot':
         for col in ['ask_price', 'ask_volume', 'bid_price', 'bid_volume']:
             if col in df.columns:
-                df[col] = df[col].apply(lambda x: x if x is not None else [0] * 10)
+                df[col] = df[col].apply(lambda x: x if isinstance(x, list) else [0] * 10)
 
     return df
 
@@ -285,12 +293,14 @@ def import_to_clickhouse(df: pd.DataFrame, table_name: str) -> int:
     if _client is None or df is None or len(df) == 0:
         return 0
 
-    try:
-        full_table = f"{_table_prefix}.{table_name}"
-        _client.insert_df(full_table, df)
-        return len(df)
-    except Exception:
-        return 0
+    with _db_lock:
+        try:
+            full_table = f"{_table_prefix}.{table_name}"
+            _client.insert_df(full_table, df)
+            return len(df)
+        except Exception as e:
+            logging.error(e)
+            return 0
 
 
 def get_file_type(file_path: Path) -> str:
