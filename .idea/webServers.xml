@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="899dc720-e26b-4db3-8c84-6126d8b2d2bb" name="root@10.170.54.73:22 password">
+        <fileTransfer rootFolder="/root" accessType="SFTP" host="10.170.54.73" port="22" sshConfigId="5996f3fc-c273-43d9-bbf3-c25a17e0fd50" sshConfig="root@10.170.54.73:22 password" />
+      </webServer>
+      <webServer id="563e0ed3-3791-4901-92f7-7e99d89fe034" name="quant-research-book">
+        <fileTransfer accessType="SFTP" host="10.170.54.73" port="22" sshConfigId="5996f3fc-c273-43d9-bbf3-c25a17e0fd50" sshConfig="root@10.170.54.73:22 password" />
+      </webServer>
+    </option>
+  </component>
+</project>

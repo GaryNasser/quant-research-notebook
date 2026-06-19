@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" autoUpload="Always" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
+    <option name="confirmBeforeUploading" value="false" />
+    <serverData>
+      <paths name="quant-research-book">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/py-project/quant-research-book" local="$PROJECT_DIR$" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/.venv" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
+      <paths name="root@10.170.54.73:22 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/py-project/quant-research-book" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/.venv" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
+    </serverData>
+    <option name="myAutoUpload" value="ALWAYS" />
+  </component>
+</project>

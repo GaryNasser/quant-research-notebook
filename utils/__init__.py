@@ -5,6 +5,7 @@ import baostock as bs
 from contextlib import contextmanager
 import sys
 from io import StringIO
+import akshare as ak
 
 ROOT_DIR = Path(__file__).parent.parent
 DATA_DIR = ROOT_DIR / "0-数据"
@@ -25,8 +26,34 @@ def baostock_connection():
         bs.logout()
         sys.stdout = old_stdout
 
+
 def _get_data_save_path(source: str, symbol: str, start_date, end_date, interval):
     return f"{source}-{symbol}-{start_date}-{end_date}-{interval}.csv"
+
+
+def get_stock_code_list(base_date='2024-01-02', force_refresh=False, filter_exchange=False):
+    """
+    获取股票列表
+    """
+    file_path = DATA_DIR / 'stock_list.csv'
+
+    if file_path.exists() and not force_refresh:
+        stock_df = pd.read_csv(file_path)
+        if filter_exchange:
+            stock_df['code'] = stock_df['code'].str.extract(r'\.(\d+)')
+        return stock_df['code'].tolist()
+    else:
+        with baostock_connection() as lg:
+            if lg.error_code != '0':
+                return []
+            rs = bs.query_all_stock(day=base_date)
+            stock_df = rs.get_data()
+            stock_df = stock_df[(stock_df['code'] > 'sh.600000') & (stock_df['code'] < 'sz.399000')]
+            stock_df.to_csv(file_path)
+            if filter_exchange:
+                stock_df['code'] = stock_df['code'].str.extract(r'\.(\d+)')
+            stock_code = stock_df['code'].tolist()
+            return stock_code
 
 def get_yahoo_data(symbols: list | str, start_date: str, end_date: str, interval: str):
     """
@@ -63,15 +90,10 @@ def get_yahoo_data(symbols: list | str, start_date: str, end_date: str, interval
 
     return _data_dict[symbols[0]] if is_single_symbol and len(symbols) else _data_dict
 
+
 def _convert_baostock_code(symbol: str) -> str:
     """
     转换股票代码为 baostock 格式
-
-    Args:
-        symbol: 股票代码，如 "000001", "600000"
-
-    Returns:
-        baostock 格式代码，如 "sh.000001", "sh.600000"
     """
     symbol = symbol.strip()
     if symbol.startswith('6'):
@@ -89,7 +111,11 @@ def _process_baostock_data(df: pd.DataFrame) -> pd.DataFrame:
     df['date'] = pd.to_datetime(df['date'])
     df.set_index('date', inplace=True)
 
-    numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'amount', 'pctChg']
+    # 在此处添加了新的数值列字段
+    numeric_cols = [
+        'open', 'high', 'low', 'close', 'volume', 'amount',
+        'pctChg', 'peTTM', 'pbMRQ', 'psTTM', 'pcfNcfTTM', 'turn'
+    ]
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -108,10 +134,9 @@ def _process_baostock_data(df: pd.DataFrame) -> pd.DataFrame:
     df.rename(columns=column_map, inplace=True)
     return df
 
+
 def fetch_baostock_data(symbols: list | str, start_date: str, end_date: str, interval: str = "d"):
     """
-    获取 BaoStock 财经数据
-
     Args:
         symbols: 单个股票代码(str) 或 股票代码列表(list)
                 支持格式：纯数字代码，如 "000001", "600000"
@@ -123,7 +148,6 @@ def fetch_baostock_data(symbols: list | str, start_date: str, end_date: str, int
         - 输入为 str 时，返回单个 DataFrame
         - 输入为 list 时，返回字典 {symbol: DataFrame}
     """
-
     _data_dict = {}
 
     is_single_symbol = isinstance(symbols, str)
@@ -135,7 +159,7 @@ def fetch_baostock_data(symbols: list | str, start_date: str, end_date: str, int
         if lg.error_code != '0':
             return None if is_single_symbol else {}
 
-        fields = "date,open,high,low,close,volume,amount,pctChg"
+        fields = "date,open,high,low,close,volume,amount,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,turn"
 
         for symbol in symbols:
             file_path = DATA_DIR / _get_data_save_path('bs', symbol, start_date, end_date, interval)
@@ -153,7 +177,7 @@ def fetch_baostock_data(symbols: list | str, start_date: str, end_date: str, int
                 start_date=start_date,
                 end_date=end_date,
                 frequency=interval,
-                adjustflag="2"
+                adjustflag="1"
             )
 
             if rs.error_code != '0':
@@ -178,3 +202,24 @@ def fetch_baostock_data(symbols: list | str, start_date: str, end_date: str, int
     if is_single_symbol and symbols:
         return _data_dict.get(symbols[0], pd.DataFrame())
     return _data_dict
+
+
+def get_china_10_year_treasury_yield(start_year: str | int, end_year: str | int=None):
+    end_year = start_year if end_year is None else end_year
+    start, end = int(start_year), int(end_year)
+    year_lst = [str(year) for year in range(start, end + 1)]
+    yield_lst = []
+
+    for year in year_lst:
+        start_date, end_date = f"{year}0101", f"{year}1231"
+
+        bond_china_yield_df = ak.bond_china_yield(start_date, end_date)
+        rf_df = bond_china_yield_df[bond_china_yield_df['曲线名称'] == '中债国债收益率曲线'][['日期', '10年']]
+        rf_df['日期'] = pd.to_datetime(rf_df['日期'])
+        yield_lst.append(rf_df)
+
+    if yield_lst is None:
+        return pd.DataFrame()
+
+    result_df = pd.concat(yield_lst, ignore_index=True)
+    return result_df
