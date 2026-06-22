@@ -5,6 +5,7 @@
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/0-数据" />
       <excludeFolder url="file://$MODULE_DIR$/data" />
+      <excludeFolder url="file://$MODULE_DIR$/1-权重" />
     </content>
     <orderEntry type="jdk" jdkName="Python 3.10 (quant-research-notebook)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
