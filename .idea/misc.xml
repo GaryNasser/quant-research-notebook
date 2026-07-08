@@ -3,4 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="Python 3.10 (quant-research-notebook)" />
   </component>
+  <component name="ProjectRootManager" version="2" project-jdk-name="Remote Python 3.10.20 (sftp://garylab@100.106.229.71:22/home/garylab/miniconda3/envs/quant/bin/python)" project-jdk-type="Python SDK" />
 </project>
