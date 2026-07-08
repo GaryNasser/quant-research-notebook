@@ -8,7 +8,7 @@ from io import StringIO
 import akshare as ak
 
 ROOT_DIR = Path(__file__).parent.parent
-DATA_DIR = ROOT_DIR / "0-数据"
+DATA_DIR = ROOT_DIR / "0-data"
 
 
 @contextmanager
@@ -55,7 +55,7 @@ def get_stock_code_list(base_date='2024-01-02', force_refresh=False, filter_exch
             stock_code = stock_df['code'].tolist()
             return stock_code
 
-def get_yahoo_data(symbols: list | str, start_date: str, end_date: str, interval: str):
+def get_yahoo_data(symbols: list | str, start_date: str, end_date: str, interval: str, persistent=False):
     """
     获取雅虎财经数据
 
@@ -64,6 +64,7 @@ def get_yahoo_data(symbols: list | str, start_date: str, end_date: str, interval
         start_date: 开始日期，格式 YYYY-MM-DD
         end_date: 结束日期，格式 YYYY-MM-DD
         interval: 数据周期 (1m/5m/15m/30m/1h/1d/1wk/1mo)
+        persistent: 是否持久化数据文件
 
     Returns:
         - str 输入: 返回 DataFrame
@@ -86,7 +87,8 @@ def get_yahoo_data(symbols: list | str, start_date: str, end_date: str, interval
                 _df.columns = _df.columns.get_level_values(0)
 
             _data_dict[symbol] = _df
-            _df.to_csv(file_path)
+            if persistent:
+                _df.to_csv(file_path)
 
     return _data_dict[symbols[0]] if is_single_symbol and len(symbols) else _data_dict
 
@@ -111,7 +113,6 @@ def _process_baostock_data(df: pd.DataFrame) -> pd.DataFrame:
     df['date'] = pd.to_datetime(df['date'])
     df.set_index('date', inplace=True)
 
-    # 在此处添加了新的数值列字段
     numeric_cols = [
         'open', 'high', 'low', 'close', 'volume', 'amount',
         'pctChg', 'peTTM', 'pbMRQ', 'psTTM', 'pcfNcfTTM', 'turn'
@@ -135,7 +136,7 @@ def _process_baostock_data(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def fetch_baostock_data(symbols: list | str, start_date: str, end_date: str, interval: str = "d"):
+def fetch_baostock_data(symbols: list | str, start_date: str, end_date: str, interval: str = "d", persistent=False):
     """
     Args:
         symbols: 单个股票代码(str) 或 股票代码列表(list)
@@ -143,6 +144,7 @@ def fetch_baostock_data(symbols: list | str, start_date: str, end_date: str, int
         start_date: 开始日期，格式 YYYY-MM-DD
         end_date: 结束日期，格式 YYYY-MM-DD
         interval: 数据周期 (d/w/m/5/15/30/60)
+        persistent: 是否持久化数据文件
 
     Returns:
         - 输入为 str 时，返回单个 DataFrame
@@ -196,12 +198,27 @@ def fetch_baostock_data(symbols: list | str, start_date: str, end_date: str, int
             if df.empty:
                 continue
 
-            df.to_csv(file_path)
+            if persistent:
+                df.to_csv(file_path)
             _data_dict[symbol] = df
 
     if is_single_symbol and symbols:
         return _data_dict.get(symbols[0], pd.DataFrame())
     return _data_dict
+
+
+def query_zz500_stocks():
+    with baostock_connection() as lg:
+        if lg.error_code != '0':
+            return None
+
+        rs = bs.query_zz500_stocks()
+        if rs.error_code != '0':
+            return pd.DataFrame()
+        else:
+            data = rs.get_data()[['code', 'code_name']]
+            return data
+
 
 
 def get_china_10_year_treasury_yield(start_year: str | int, end_year: str | int=None):
