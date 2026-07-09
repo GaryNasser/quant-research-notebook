@@ -39,7 +39,7 @@ def _build_client():
     return client
 
 
-def _get_trade_calender(start_date, end_date):
+def get_trade_calender(start_date, end_date):
     trade_date_df = ak.tool_trade_date_hist_sina()
     trade_date_df['trade_date'] = pd.to_datetime(trade_date_df['trade_date'])
 
@@ -62,7 +62,7 @@ def _get_raw_data(start_date, end_date):
     return _df
 
 
-def process_raw_data(data_df: pd.DataFrame, calender_df, window_size=30, future_size=10, keep_time_series=False):
+def process_raw_data(data_df: pd.DataFrame, calender_df, window_size=30, future_size=10, keep_time_series=False, normalize=False):
     codes = data_df['stock_code'].unique()
     grid = pd.MultiIndex.from_product(
         [codes, calender_df['trade_date']],
@@ -99,7 +99,10 @@ def process_raw_data(data_df: pd.DataFrame, calender_df, window_size=30, future_
     y_clean = y_flat[mask]
 
     if keep_time_series:
-        return X_lst, y_zscore
+        if normalize:
+            return X_lst, y_lst
+        else:
+            return X_lst, y_zscore
     else:
         return X_clean, y_clean
 
@@ -107,7 +110,7 @@ def process_raw_data(data_df: pd.DataFrame, calender_df, window_size=30, future_
 class OHLCVDataset(Dataset):
     def __init__(self, start_date, end_date):
         self.raw_df = _get_raw_data(start_date, end_date)
-        self.trade_calender = _get_trade_calender(start_date, end_date)
+        self.trade_calender = get_trade_calender(start_date, end_date)
         self.X, self.y = process_raw_data(self.raw_df, self.trade_calender)
 
     def __len__(self):
@@ -447,7 +450,7 @@ if __name__ == '__main__':
 
     if args.mode == 'train':
         train_on_period(args.epoch, args.batch_size, args.learning_rate,
-                        start_date='2024-01-01', end_date='2025-01-01', device=device)
+                        start_date='2018-01-01', end_date='2021-01-01', device=device)
     elif args.mode == 'val':
-        ic_daily, icir= backtest_on_period(start_date='2025-01-01', end_date='2026-01-01', device=device)
+        ic_daily, icir= backtest_on_period(start_date='2021-01-01', end_date='2022-01-01', device=device)
         plot_ic_result(ic_daily, icir)
