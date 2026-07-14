@@ -6,7 +6,20 @@
       <paths name="garylab@100.106.229.71:22 password">
         <serverdata>
           <mappings>
-            <mapping deploy="/home/garylab/py-projects/quant-research-book" local="$PROJECT_DIR$" />
+            <mapping deploy="/py-projects/quant-research-book" local="$PROJECT_DIR$" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/.venv" />
+            <excludedPath local="true" path="$PROJECT_DIR$/0-data" />
+            <excludedPath local="true" path="$PROJECT_DIR$/1-weights" />
+            <excludedPath local="true" path="$PROJECT_DIR$/2-result" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
+      <paths name="garylab@100.106.229.71:22 password (2)">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>

@@ -159,6 +159,7 @@ def fetch_baostock_data(symbols: list | str, start_date: str, end_date: str, int
 
     with baostock_connection() as lg:
         if lg.error_code != '0':
+            print(f"Failed to log baostock: {lg.error_msg}")
             return None if is_single_symbol else {}
 
         fields = "date,open,high,low,close,volume,amount,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,turn"
@@ -240,3 +241,15 @@ def get_china_10_year_treasury_yield(start_year: str | int, end_year: str | int=
 
     result_df = pd.concat(yield_lst, ignore_index=True)
     return result_df
+
+
+def get_trade_calender(start_date, end_date):
+    trade_date_df = ak.tool_trade_date_hist_sina()
+    trade_date_df['trade_date'] = pd.to_datetime(trade_date_df['trade_date'])
+
+    start_date = pd.to_datetime(start_date)
+    end_date = pd.to_datetime(end_date)
+
+    mask = (trade_date_df['trade_date'] >= start_date) & (trade_date_df['trade_date'] <= end_date)
+
+    return trade_date_df[mask].reset_index(drop=True)
