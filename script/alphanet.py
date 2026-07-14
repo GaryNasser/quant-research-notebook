@@ -12,7 +12,7 @@ import torch
 from dotenv import load_dotenv
 from torch.utils.data import Dataset, DataLoader, random_split
 import argparse
-from utils import ROOT_DIR
+from utils import ROOT_DIR, get_trade_calender
 from numpy.lib.stride_tricks import sliding_window_view
 import clickhouse_connect
 from scipy.stats import spearmanr
@@ -37,18 +37,6 @@ def _build_client():
     )
 
     return client
-
-
-def get_trade_calender(start_date, end_date):
-    trade_date_df = ak.tool_trade_date_hist_sina()
-    trade_date_df['trade_date'] = pd.to_datetime(trade_date_df['trade_date'])
-
-    start_date = pd.to_datetime(start_date)
-    end_date = pd.to_datetime(end_date)
-
-    mask = (trade_date_df['trade_date'] >= start_date) & (trade_date_df['trade_date'] <= end_date)
-
-    return trade_date_df[mask].reset_index(drop=True)
 
 
 def _get_raw_data(start_date, end_date):
@@ -444,13 +432,17 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=1024)
     parser.add_argument('--epoch', type=int, default=10)
     parser.add_argument('--learning_rate', '-lr', type=float, default=1e-3)
+    parser.add_argument('--start_date', '-start', type=str, default='2010-01-01')
+    parser.add_argument('--end_date', '-end', type=str, default='2015-01-01')
+
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     if args.mode == 'train':
         train_on_period(args.epoch, args.batch_size, args.learning_rate,
-                        start_date='2018-01-01', end_date='2021-01-01', device=device)
+                        start_date=args.start_date, end_date=args.end_date, device=device)
     elif args.mode == 'val':
-        ic_daily, icir= backtest_on_period(start_date='2021-01-01', end_date='2022-01-01', device=device)
+        ic_daily, icir= backtest_on_period(start_date=args.start_date, end_date=args.end_date,
+                                           device=device)
         plot_ic_result(ic_daily, icir)

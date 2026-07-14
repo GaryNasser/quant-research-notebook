@@ -16,7 +16,11 @@ Dependencies:
         * DATA_DIR (pathlib.Path) pointing to the data directory for logs/checkpoints
 
 Usage:
+    # Process all eligible stocks (default behavior)
     python import_daily_market.py --start-date 2015-01-01 --end-date 2020-12-31 --batch-size 100
+
+    # Process specific stocks only
+    python import_daily_market.py --codes sh.600000,sz.000001 --start-date 2020-01-01 --end-date 2020-12-31
 """
 
 import warnings
@@ -35,14 +39,6 @@ import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 import clickhouse_connect
-
-# Optionally load environment variables from a .env file
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
-
 from utils import get_stock_code_list, fetch_baostock_data, DATA_DIR
 
 
@@ -103,6 +99,12 @@ def parse_args():
     parser.add_argument(
         "--no-filter-exchange", dest="filter_exchange", action="store_false",
         help="Do not filter by exchange"
+    )
+    # *** New argument: specific stock codes ***
+    parser.add_argument(
+        "--codes", type=str, default=None,
+        help="Comma-separated list of stock codes to process (e.g., sh.600000,sz.000001). "
+             "If provided, only these codes are imported and --filter-exchange is ignored."
     )
     # File paths
     parser.add_argument(
@@ -187,8 +189,18 @@ def main():
     )
     add_log_event("INFO", f"Connected to ClickHouse at {args.host}:{args.port}/{args.database}")
 
-    # Fetch the list of stocks to process
-    stock_code_lst = get_stock_code_list(filter_exchange=args.filter_exchange)
+    if args.codes:
+        # Use the explicitly provided codes
+        stock_code_lst = [code.strip() for code in args.codes.split(",") if code.strip()]
+        add_log_event("INFO", f"Using {len(stock_code_lst)} explicitly provided stock codes")
+        # When codes are given, filter_exchange has no effect
+        if args.filter_exchange:
+            add_log_event("INFO", "filter_exchange is ignored when --codes is provided")
+    else:
+        # Default behavior: get all eligible codes from utils
+        stock_code_lst = get_stock_code_list(filter_exchange=args.filter_exchange)
+        add_log_event("INFO", f"Fetched {len(stock_code_lst)} stocks from get_stock_code_list")
+
     processed_set = load_checkpoint()
     codes_to_process = [code for code in stock_code_lst if code not in processed_set]
     add_log_event(
@@ -307,7 +319,6 @@ def _flush_batch(client, table_name, batch_dfs, target_columns, processed_set,
             failed_records.append((code, "insert", str(e)))
     finally:
         batch_dfs.clear()
-        # Help garbage collection
         if "full_df" in locals():
             del full_df
         gc.collect()
