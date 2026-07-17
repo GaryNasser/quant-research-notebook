@@ -1,24 +1,5 @@
 """
 Import Level2 CSV data (from 7z archives or loose files) into ClickHouse.
-
-This script scans a data directory for 7z archives or CSV files, extracts them
-if needed, cleans the data according to pre-defined schemas, and imports them
-into corresponding ClickHouse tables.
-
-Configuration is provided via command-line arguments (with environment variable fallbacks).
-All output is in English.
-
-Usage examples:
-
-    # Process archives in a specific directory with password
-    python import_level2.py --data-dir /path/to/data --password mypassword
-
-    # Use environment variables for sensitive data
-    export CLICKHOUSE_PASSWORD=your_password
-    python import_level2.py --data-dir /data/level2 --host 10.0.0.5
-
-    # Increase concurrency and enable verbose logging
-    python import_level2.py --max-workers 16 --verbose --log-file import.log
 """
 
 import os
@@ -27,6 +8,7 @@ import argparse
 import logging
 import clickhouse_connect
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,19 +17,15 @@ import subprocess
 import shutil
 import warnings
 import threading
+
 _db_lock = threading.Lock()
 
-# Suppress verbose logs from clickhouse_connect and pandas warnings
 logging.getLogger("clickhouse_connect").setLevel(logging.CRITICAL + 1)
 warnings.filterwarnings('ignore')
 
-# ---------- Module-level runtime configuration ----------
-# These are set in main() after parsing command-line arguments.
-# They are safe for concurrent read access by worker threads.
-_client = None          # clickhouse_connect client instance
+_client = None
 _table_prefix = "level2"
 _max_workers = 8
-# --------------------------------------------------------
 
 stats_lock = Lock()
 
@@ -61,73 +39,56 @@ def parse_args():
 Examples:
   %(prog)s --password mypassword
   %(prog)s --data-dir /data/level2 --host 10.0.0.5 --user reader
-  %(prog)s --max-workers 16 --verbose
+  %(prog)s --max-workers 16
         """
     )
-
-    # Data source
     parser.add_argument('--data-dir', type=str,
                         default=os.getenv("DATA_DIR", "/data"),
-                        help='Directory containing CSV files or 7z archives (default: %(default)s)')
-
-    # ClickHouse connection
+                        help='Directory containing CSV files or 7z archives')
     parser.add_argument('--host', type=str,
                         default=os.getenv("CLICKHOUSE_HOST", "127.0.0.1"),
-                        help='ClickHouse host (default: %(default)s)')
+                        help='ClickHouse host')
     parser.add_argument('--port', type=int,
                         default=int(os.getenv("CLICKHOUSE_PORT", "8123")),
-                        help='ClickHouse HTTP port (default: %(default)s)')
+                        help='ClickHouse HTTP port')
     parser.add_argument('--user', type=str,
                         default=os.getenv("CLICKHOUSE_USER", "default"),
-                        help='ClickHouse user (default: %(default)s)')
+                        help='ClickHouse user')
     parser.add_argument('--password', type=str,
                         default=os.getenv("CLICKHOUSE_PASSWORD"),
-                        help='ClickHouse password (required if not in env)')
+                        help='ClickHouse password')
     parser.add_argument('--database', type=str,
                         default=os.getenv("CLICKHOUSE_DB", "default"),
-                        help='ClickHouse database (default: %(default)s)')
+                        help='ClickHouse database')
     parser.add_argument('--table-prefix', type=str,
                         default=os.getenv("CLICKHOUSE_TABLE_PREFIX", "level2"),
-                        help='Table name prefix (default: %(default)s)')
-
-    # Performance
+                        help='Table name prefix')
     parser.add_argument('--max-workers', type=int,
                         default=int(os.getenv("MAX_WORKERS", "8")),
-                        help='Maximum parallel workers for file processing (default: %(default)s)')
-
-    # Logging
+                        help='Maximum parallel workers')
     parser.add_argument('--log-file', type=str, default='import_level2.log',
-                        help='Path to log file (default: %(default)s)')
-    parser.add_argument('--verbose', '-v', action='store_true',
-                        help='Enable verbose (DEBUG level) logging')
-
+                        help='Path to log file')
     args = parser.parse_args()
-
     if not args.password:
-        parser.error("--password is required, set it via command line or CLICKHOUSE_PASSWORD environment variable")
-
+        parser.error("--password is required (or set CLICKHOUSE_PASSWORD)")
     return args
 
 
-def setup_logging(log_file: str, verbose: bool):
-    """Configure root logger to output to console and file."""
-    log_level = logging.DEBUG if verbose else logging.INFO
+def setup_logging(log_file: str):
+    """Configure logging to console and file (INFO level)."""
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
-
     logger = logging.getLogger()
-    logger.setLevel(log_level)
+    logger.setLevel(logging.INFO)
 
-    # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(log_level)
     console_handler.setFormatter(logging.Formatter(log_format))
+    console_handler.setLevel(logging.INFO)
     logger.addHandler(console_handler)
 
-    # File handler
     try:
         file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setLevel(log_level)
         file_handler.setFormatter(logging.Formatter(log_format))
+        file_handler.setLevel(logging.INFO)
         logger.addHandler(file_handler)
     except Exception as e:
         logger.warning(f"Could not create log file {log_file}: {e}")
@@ -136,41 +97,47 @@ def setup_logging(log_file: str, verbose: bool):
 def clean_dataframe(df: pd.DataFrame, table_type: str) -> pd.DataFrame:
     """
     Clean and transform raw CSV dataframe to match ClickHouse table schema.
-
-    This function removes unnamed columns, empty rows, renames columns according
-    to predefined mapping, handles array fields for snapshot data, and performs
-    type conversions. Missing values are kept as native pandas NA (pd.NA) using
-    nullable dtypes (Int64, Float64, string), which ClickHouse-connect can
-    safely serialize.
-
-    Args:
-        df: Raw pandas DataFrame read from CSV.
-        table_type: Type of data - 'snapshot', 'entrust', or 'trade'.
-
-    Returns:
-        Cleaned DataFrame with English column names and correct nullable types,
-        or None if table_type is unknown.
+    Supports 'snapshot', 'entrust', and 'trade' table types.
     """
-
+    # Remove unnamed columns and completely empty rows
     unnamed_cols = [col for col in df.columns if 'Unnamed' in col]
     if unnamed_cols:
         df = df.drop(columns=unnamed_cols)
-
     df = df.dropna(how='all')
 
+    # Strip spaces from column names
+    df.columns = df.columns.str.strip()
+
     if table_type == 'snapshot':
-        # Combine 10 ask/bid price/volume columns into list columns
+        # Identify the 10 ask/bid price/volume columns
         ask_price_cols = [f'申卖价{i}' for i in range(1, 11) if f'申卖价{i}' in df.columns]
         ask_volume_cols = [f'申卖量{i}' for i in range(1, 11) if f'申卖量{i}' in df.columns]
         bid_price_cols = [f'申买价{i}' for i in range(1, 11) if f'申买价{i}' in df.columns]
         bid_volume_cols = [f'申买量{i}' for i in range(1, 11) if f'申买量{i}' in df.columns]
 
+        all_array_cols = ask_price_cols + ask_volume_cols + bid_price_cols + bid_volume_cols
+
         if ask_price_cols and ask_volume_cols:
+            # Convert to numeric
+            for col in all_array_cols:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            # Build list columns
             df['ask_price'] = df[ask_price_cols].values.tolist()
             df['ask_volume'] = df[ask_volume_cols].values.tolist()
             df['bid_price'] = df[bid_price_cols].values.tolist()
             df['bid_volume'] = df[bid_volume_cols].values.tolist()
-            df = df.drop(columns=ask_price_cols + ask_volume_cols + bid_price_cols + bid_volume_cols)
+
+            # Drop original columns
+            df = df.drop(columns=all_array_cols)
+
+            # Replace NaN inside lists with None
+            def replace_nan_with_none(lst):
+                return [None if (isinstance(x, float) and np.isnan(x)) else x for x in lst]
+
+            for col in ['ask_price', 'ask_volume', 'bid_price', 'bid_volume']:
+                if col in df.columns:
+                    df[col] = df[col].apply(replace_nan_with_none)
 
         column_mapping = {
             '万得代码': 'wind_code',
@@ -233,12 +200,19 @@ def clean_dataframe(df: pd.DataFrame, table_type: str) -> pd.DataFrame:
     else:
         return None
 
+    # Rename existing columns
     existing_mapping = {k: v for k, v in column_mapping.items() if k in df.columns}
     df = df.rename(columns=existing_mapping)
 
+    # Keep only needed columns
     keep_cols = list(existing_mapping.values())
+    if table_type == 'snapshot':
+        for col in ['ask_price', 'ask_volume', 'bid_price', 'bid_volume']:
+            if col in df.columns:
+                keep_cols.append(col)
     df = df[keep_cols]
 
+    # Type conversion
     int_cols = {
         'trade_date', 'trade_time', 'trade_count', 'trade_flag', 'bs_flag',
         'entrust_no', 'exchange_entrust_no', 'trade_no', 'ask_order_no', 'bid_order_no',
@@ -270,26 +244,11 @@ def clean_dataframe(df: pd.DataFrame, table_type: str) -> pd.DataFrame:
             df[col] = df[col].astype(str).replace(['', 'nan', 'NaN', 'None', 'NaT'], None)
             df[col] = df[col].astype('string')
 
-    if table_type == 'snapshot':
-        for col in ['ask_price', 'ask_volume', 'bid_price', 'bid_volume']:
-            if col in df.columns:
-                df[col] = df[col].apply(lambda x: x if isinstance(x, list) else [0] * 10)
-
     return df
 
 
 def import_to_clickhouse(df: pd.DataFrame, table_name: str) -> int:
-    """
-    Insert a cleaned DataFrame into the corresponding ClickHouse table.
-
-    Args:
-        df: Cleaned DataFrame ready for insertion.
-        table_name: Target table suffix (e.g., 'snapshot', 'entrust', 'trade').
-                    The full table name is `{_table_prefix}.{table_name}`.
-
-    Returns:
-        Number of rows successfully inserted, or 0 if an error occurs or DataFrame is empty.
-    """
+    """Insert a cleaned DataFrame into the corresponding ClickHouse table."""
     if _client is None or df is None or len(df) == 0:
         return 0
 
@@ -299,22 +258,12 @@ def import_to_clickhouse(df: pd.DataFrame, table_name: str) -> int:
             _client.insert_df(full_table, df)
             return len(df)
         except Exception as e:
-            logging.error(e)
+            logging.error(f"Insert error ({table_name}): {e}")
             return 0
 
 
 def get_file_type(file_path: Path) -> str:
-    """
-    Determine the data type of a CSV file based on its filename.
-
-    Recognized keywords:
-      '行情' or 'snapshot' -> snapshot
-      '委托' or 'entrust' -> entrust
-      '成交' or 'trade'    -> trade
-
-    Returns:
-        One of 'snapshot', 'entrust', 'trade', or None if unrecognized.
-    """
+    """Determine data type based on filename ('snapshot', 'entrust', 'trade')."""
     file_name = file_path.stem
     if '行情' in file_name or 'snapshot' in file_name.lower():
         return 'snapshot'
@@ -322,21 +271,11 @@ def get_file_type(file_path: Path) -> str:
         return 'entrust'
     elif '成交' in file_name or 'trade' in file_name.lower():
         return 'trade'
-    else:
-        return None
+    return None
 
 
 def count_csv_files_by_type(csv_files: list) -> dict:
-    """
-    Count the number of CSV files for each table type.
-
-    Args:
-        csv_files: List of Path objects pointing to CSV files.
-
-    Returns:
-        Dictionary with keys 'snapshot', 'entrust', 'trade', 'unknown'
-        and their corresponding counts.
-    """
+    """Count CSV files by table type."""
     stats = {'snapshot': 0, 'entrust': 0, 'trade': 0, 'unknown': 0}
     for file_path in csv_files:
         file_type = get_file_type(file_path)
@@ -345,13 +284,7 @@ def count_csv_files_by_type(csv_files: list) -> dict:
 
 
 def print_file_statistics(csv_files: list, source_desc: str = ""):
-    """
-    Print a summary of CSV files by type.
-
-    Args:
-        csv_files: List of file paths.
-        source_desc: Description of the source (e.g., archive name).
-    """
+    """Print summary of CSV files by type."""
     stats = count_csv_files_by_type(csv_files)
     total = len(csv_files)
     logger = logging.getLogger(__name__)
@@ -372,16 +305,7 @@ def print_file_statistics(csv_files: list, source_desc: str = ""):
 
 
 def process_single_file(file_path: Path) -> dict:
-    """
-    Process a single CSV file: read, clean, and insert into ClickHouse.
-
-    Args:
-        file_path: Path to the CSV file.
-
-    Returns:
-        A dict with keys 'type', 'rows', 'success' if processing was attempted,
-        otherwise None if the file type could not be determined or an error occurred.
-    """
+    """Read, clean, and import a single CSV file."""
     logger = logging.getLogger(__name__)
     file_type = get_file_type(file_path)
     if not file_type:
@@ -390,7 +314,7 @@ def process_single_file(file_path: Path) -> dict:
     try:
         df = pd.read_csv(file_path, encoding='gbk')
 
-        # Filter out duplicate header rows where first column equals its own header name
+        # Remove duplicate header rows
         if df.shape[0] > 0:
             first_col = df.columns[0]
             df = df[df[first_col] != first_col]
@@ -402,26 +326,13 @@ def process_single_file(file_path: Path) -> dict:
             return {'type': file_type, 'rows': rows_inserted, 'success': rows_inserted > 0}
         else:
             return {'type': file_type, 'rows': 0, 'success': False}
-
     except Exception as e:
         logger.error(f"Error processing {file_path}: {e}")
         return None
 
 
 def process_csv_files(csv_files: list, desc: str = "Import progress") -> dict:
-    """
-    Process a list of CSV files in parallel and return aggregated statistics.
-
-    Args:
-        csv_files: List of CSV file paths.
-        desc: Description for the progress bar.
-
-    Returns:
-        Nested dictionary:
-            { 'snapshot': {'files': count, 'rows': total_rows},
-              'entrust':  ...,
-              'trade':    ... }
-    """
+    """Process a list of CSV files in parallel and aggregate statistics."""
     stats = {
         'snapshot': {'files': 0, 'rows': 0},
         'entrust': {'files': 0, 'rows': 0},
@@ -445,16 +356,7 @@ def process_csv_files(csv_files: list, desc: str = "Import progress") -> dict:
 
 
 def merge_stats(stats1: dict, stats2: dict) -> dict:
-    """
-    Merge two statistics dictionaries by adding file and row counts.
-
-    Args:
-        stats1: Base stats dict (will be modified in-place).
-        stats2: Stats dict to add.
-
-    Returns:
-        The modified stats1 dictionary.
-    """
+    """Merge two statistics dicts."""
     for key in stats1.keys():
         stats1[key]['files'] += stats2[key]['files']
         stats1[key]['rows'] += stats2[key]['rows']
@@ -462,16 +364,7 @@ def merge_stats(stats1: dict, stats2: dict) -> dict:
 
 
 def process_archive_files(data_dir: Path) -> dict:
-    """
-    Discover 7z archives in the data directory, extract them one by one,
-    import all CSV files inside, then delete the archive and temporary files.
-
-    Args:
-        data_dir: Directory containing .7z files.
-
-    Returns:
-        Aggregated import statistics (same structure as process_csv_files).
-    """
+    """Discover 7z archives, extract them, import CSVs, then clean up."""
     logger = logging.getLogger(__name__)
     archive_files = sorted(list(data_dir.glob('*.7z')))
 
@@ -489,7 +382,6 @@ def process_archive_files(data_dir: Path) -> dict:
     logger.info(f"\nFound {len(archive_files)} archive(s)")
     logger.info(f"{'=' * 60}")
 
-    # Preview the contents of all archives without extracting
     logger.info("Scanning archive contents...")
     total_csv_count = 0
     type_counts = {'snapshot': 0, 'entrust': 0, 'trade': 0, 'unknown': 0}
@@ -498,7 +390,6 @@ def process_archive_files(data_dir: Path) -> dict:
         try:
             cmd = ["7z", "l", str(arch)]
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-
             for line in result.stdout.split('\n'):
                 if '.csv' in line.lower():
                     parts = line.split()
@@ -533,11 +424,10 @@ def process_archive_files(data_dir: Path) -> dict:
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
 
             csv_files = list(temp_extract_dir.rglob('*.csv'))
-
             if csv_files:
                 current_stats = count_csv_files_by_type(csv_files)
-                logger.info(f"    Extracted {len(csv_files)} CSV file(s):")
-                logger.info(f"      Snapshot: {current_stats['snapshot']}, "
+                logger.info(f"    Extracted {len(csv_files)} CSV file(s): "
+                            f"Snapshot: {current_stats['snapshot']}, "
                             f"Entrust: {current_stats['entrust']}, "
                             f"Trade: {current_stats['trade']}")
 
@@ -548,11 +438,8 @@ def process_archive_files(data_dir: Path) -> dict:
             else:
                 logger.warning("    Warning: No CSV files found in archive")
 
-            # Clean up extracted folder
             shutil.rmtree(temp_extract_dir)
             logger.info("    Cleanup done")
-
-            # Delete the original archive
             arch.unlink()
             logger.info("    Archive deleted")
 
@@ -565,15 +452,7 @@ def process_archive_files(data_dir: Path) -> dict:
 
 
 def process_direct_csv_files(data_dir: Path) -> dict:
-    """
-    Process CSV files directly (without archives).
-
-    Args:
-        data_dir: Directory containing CSV files.
-
-    Returns:
-        Import statistics.
-    """
+    """Process loose CSV files from a directory."""
     logger = logging.getLogger(__name__)
     csv_files = list(data_dir.rglob('*.csv'))
 
@@ -590,11 +469,10 @@ def process_direct_csv_files(data_dir: Path) -> dict:
 def main():
     """Main entry point."""
     args = parse_args()
-    setup_logging(args.log_file, args.verbose)
+    setup_logging(args.log_file)
     logger = logging.getLogger(__name__)
     logger.info("Starting Level2 data import")
 
-    # ---------- Initialize global configuration ----------
     global _client, _table_prefix, _max_workers
 
     try:
@@ -613,7 +491,6 @@ def main():
 
     _table_prefix = args.table_prefix
     _max_workers = args.max_workers
-    # -----------------------------------------------------
 
     data_dir = Path(args.data_dir)
     if not data_dir.exists():
@@ -628,7 +505,6 @@ def main():
         logger.info("No archives found, falling back to direct CSV processing...")
         stats = process_direct_csv_files(data_dir)
 
-    # Final summary
     summary = f"""
 {'=' * 60}
 Import completed!

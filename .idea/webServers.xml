@@ -9,7 +9,7 @@
         <fileTransfer accessType="SFTP" host="10.170.54.73" port="22" sshConfigId="5996f3fc-c273-43d9-bbf3-c25a17e0fd50" sshConfig="root@10.170.54.73:22 password" />
       </webServer>
       <webServer id="7855a9f9-7cd3-473f-a2cf-01fc4ce0c33a" name="home-server">
-        <fileTransfer rootFolder="/home/garylab" accessType="SFTP" host="100.106.229.71" port="22" sshConfigId="16e9af22-a3ff-442c-b696-1952fd7ee7b7" sshConfig="garylab@100.106.229.71:22 password">
+        <fileTransfer accessType="SFTP" host="100.106.229.71" port="22" sshConfigId="16e9af22-a3ff-442c-b696-1952fd7ee7b7" sshConfig="garylab@100.106.229.71:22 password">
           <advancedOptions>
             <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
           </advancedOptions>
