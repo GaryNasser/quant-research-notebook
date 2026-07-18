@@ -2,13 +2,7 @@
 <project version="4">
   <component name="WebServers">
     <option name="servers">
-      <webServer id="899dc720-e26b-4db3-8c84-6126d8b2d2bb" name="root@10.170.54.73:22 password">
-        <fileTransfer rootFolder="/root" accessType="SFTP" host="10.170.54.73" port="22" sshConfigId="5996f3fc-c273-43d9-bbf3-c25a17e0fd50" sshConfig="root@10.170.54.73:22 password" />
-      </webServer>
-      <webServer id="563e0ed3-3791-4901-92f7-7e99d89fe034" name="quant-research-book">
-        <fileTransfer accessType="SFTP" host="10.170.54.73" port="22" sshConfigId="5996f3fc-c273-43d9-bbf3-c25a17e0fd50" sshConfig="root@10.170.54.73:22 password" />
-      </webServer>
-      <webServer id="7855a9f9-7cd3-473f-a2cf-01fc4ce0c33a" name="home-server">
+      <webServer id="42fdb531-33d7-4f1d-90a9-488f9ce5763f" name="home-server">
         <fileTransfer accessType="SFTP" host="100.106.229.71" port="22" sshConfigId="16e9af22-a3ff-442c-b696-1952fd7ee7b7" sshConfig="garylab@100.106.229.71:22 password">
           <advancedOptions>
             <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />

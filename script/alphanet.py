@@ -63,6 +63,7 @@ def process_raw_data(data_df: pd.DataFrame, calender_df, window_size=30, future_
     y_lst = []
 
     feature_cols = ['open', 'close', 'high', 'low', 'volume', 'amount', 'pct_chg', 'turnover_rate']
+    full_df[feature_cols] = full_df[feature_cols].ffill()
 
     for stock_code, single_stock_df in full_df.groupby('stock_code'):
         total = window_size + future_size
